@@ -16,7 +16,7 @@ to view the version of the installed binary.
 Inside the editor, you can open the command menu by pressing the `:` key, you can then type a command
 from the command list below and execute it with the `return` key. Additionally, there are keybinds for certain commands.
 
-A simple example of using kyutile is as follows:
+A simple example of using kyum is as follows:
 1. Create an empty image using `:n <width> <height>`, or open a file using `:o path`.
 2. Select a color using `:t <color>` (for example `:t red`).
 3. Move the cursor using either the arrow keys or the `h` `j` `k` `l` keys.
