@@ -16,7 +16,7 @@ const SELECT_COLOR: Color = Color::Rgb(75, 0, 255);
 const CURSOR_COLOR: Color = Color::Rgb(255, 0, 75);
 
 impl State {
-    fn pixel(&'_ self, x: u32, y: u32) -> Option<Paragraph<'_>> {
+    fn pixel(&'_ self, x: u32, y: u32) -> Option<(Paragraph<'_>, Paragraph<'_>)> {
         if x < self.buffer.buffer.width() + 2 && y < self.buffer.buffer.width() + 2 {
             Some(
                 match (
@@ -25,31 +25,52 @@ impl State {
                     x == self.buffer.buffer.width() + 1,
                     y == self.buffer.buffer.height() + 1,
                 ) {
-                    (true, true, _, _) => Paragraph::new("|-"),
-                    (true, _, _, true) => Paragraph::new("|-"),
-                    (_, true, true, _) => Paragraph::new("-|"),
-                    (_, _, true, true) => Paragraph::new("-|"),
-                    (false, true, false, _) | (false, _, false, true) => Paragraph::new("--"),
-                    (true, false, _, false) => Paragraph::new("| "),
-                    (_, false, true, false) => Paragraph::new(" |"),
+                    (true, true, _, _) | (true, _, _, true) => {
+                        (Paragraph::new("|"), Paragraph::new("-"))
+                    }
+                    (_, true, true, _) | (_, _, true, true) => {
+                        (Paragraph::new("-"), Paragraph::new("|"))
+                    }
+                    (false, true, false, _) | (false, _, false, true) => {
+                        (Paragraph::new("-"), Paragraph::new("-"))
+                    }
+                    (true, false, _, false) => (Paragraph::new("|"), Paragraph::new(" ")),
+                    (_, false, true, false) => (Paragraph::new(" "), Paragraph::new("|")),
                     _ => {
                         let i = x - 1;
                         let j = y - 1;
                         let select = self.buffer.select.contains(&(i, j));
-                        let [r, g, b, _] = self.buffer.buffer.get_pixel(i, j).0;
-                        Paragraph::new(if i == self.cursorx && j == self.cursory {
+                        let cursor = self.cursorx == i && self.cursory == j;
+                        let [r, g, b, a] = self.buffer.buffer.get_pixel(i, j).0;
+                        let (rf, gf, bf, af) = (r as f64, g as f64, b as f64, a as f64 / 255.0);
+                        let maf = 1.0 - af;
+                        let text = if cursor {
                             "<>"
                         } else if select {
                             "\\\\"
                         } else {
                             "  "
-                        })
-                        .bg(Color::Rgb(r, g, b))
-                        .fg(if select {
+                        };
+                        let fg = if select {
                             SELECT_COLOR
-                        } else {
+                        } else if cursor {
                             CURSOR_COLOR
-                        })
+                        } else {
+                            Color::Rgb(0, 0, 0)
+                        };
+                        let (bg0, bg1) = (
+                            Color::Rgb((rf * af) as u8, (bf * af) as u8, (gf * af) as u8),
+                            Color::Rgb(
+                                (rf * af + 20.0 * maf) as u8,
+                                (bf * af + 20.0 * maf) as u8,
+                                (gf * af + 20.0 * maf) as u8,
+                            ),
+                        );
+                        let (bgl, bgr) = if (j % 2) == 0 { (bg0, bg1) } else { (bg1, bg0) };
+                        (
+                            Paragraph::new(&text[0..1]).fg(fg).bg(bgl),
+                            Paragraph::new(&text[1..2]).fg(fg).bg(bgr),
+                        )
                     }
                 },
             )
@@ -66,7 +87,12 @@ impl State {
                     self.cursorx.saturating_sub((width - 3) as u32) + x as u32,
                     self.cursory.saturating_sub(area.height as u32 - 3) + y as u32,
                 ) {
-                    pixel.render(Rect::new(area.x + 2 * x, area.y + y, 2, 1), buf);
+                    pixel
+                        .0
+                        .render(Rect::new(area.x + 2 * x, area.y + y, 1, 1), buf);
+                    pixel
+                        .1
+                        .render(Rect::new(area.x + 2 * x + 1, area.y + y, 1, 1), buf);
                 }
             }
         }

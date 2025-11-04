@@ -292,12 +292,12 @@ impl State {
                 }
             }
             Brush::Add => {
-                if self.buffer.select.insert((self.cursory, self.cursorx)) {
+                if self.buffer.select.insert((self.cursorx, self.cursory)) {
                     self.push_undo(buffer_clone);
                 }
             }
             Brush::Subtract => {
-                if self.buffer.select.remove(&(self.cursory, self.cursorx)) {
+                if self.buffer.select.remove(&(self.cursorx, self.cursory)) {
                     self.push_undo(buffer_clone);
                 }
             }
