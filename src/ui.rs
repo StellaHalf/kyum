@@ -10,23 +10,20 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 
-use crate::{
-    state::{Bar, CommandResult, State},
-    tiles::TILES,
-};
+use crate::state::{Bar, CommandResult, State};
 
-const SELECT_COLOR: Color = Color::Rgb(0, 0, 255);
-const CURSOR_COLOR: Color = Color::Rgb(255, 0, 0);
+const SELECT_COLOR: Color = Color::Rgb(75, 0, 255);
+const CURSOR_COLOR: Color = Color::Rgb(255, 0, 75);
 
 impl State {
-    fn pixel(&self, x: usize, y: usize) -> Option<Paragraph> {
-        if x < self.map.map[0].len() + 2 && y < self.map.map.len() + 2 {
+    fn pixel(&'_ self, x: u32, y: u32) -> Option<Paragraph<'_>> {
+        if x < self.buffer.buffer.width() + 2 && y < self.buffer.buffer.width() + 2 {
             Some(
                 match (
                     x == 0,
                     y == 0,
-                    x == self.map.map[0].len() + 1,
-                    y == self.map.map.len() + 1,
+                    x == self.buffer.buffer.width() + 1,
+                    y == self.buffer.buffer.height() + 1,
                 ) {
                     (true, true, _, _) => Paragraph::new("|-"),
                     (true, _, _, true) => Paragraph::new("|-"),
@@ -36,24 +33,18 @@ impl State {
                     (true, false, _, false) => Paragraph::new("| "),
                     (_, false, true, false) => Paragraph::new(" |"),
                     _ => {
-                        let j = x - 1;
-                        let i = y - 1;
-                        let select = self.map.select.contains(&(i, j));
-                        Paragraph::new(if j == self.cursorx && i == self.cursory {
+                        let i = x - 1;
+                        let j = y - 1;
+                        let select = self.buffer.select.contains(&(i, j));
+                        let [r, g, b, _] = self.buffer.buffer.get_pixel(i, j).0;
+                        Paragraph::new(if i == self.cursorx && j == self.cursory {
                             "<>"
                         } else if select {
                             "\\\\"
                         } else {
                             "  "
                         })
-                        .bg(Color::from_u32(
-                            TILES
-                                .tiles
-                                .iter()
-                                .find(|t| t.0 as i32 == self.map.map[i][j])
-                                .unwrap()
-                                .2 as u32,
-                        ))
+                        .bg(Color::Rgb(r, g, b))
                         .fg(if select {
                             SELECT_COLOR
                         } else {
@@ -69,11 +60,11 @@ impl State {
 
     fn render_map(&self, area: Rect, buf: &mut Buffer) {
         let width = area.width / 2;
-        for x in 0..width.min(self.map.map[0].len() as u16 + 2) {
-            for y in 0..area.height.min(self.map.map.len() as u16 + 2) {
+        for x in 0..width.min(self.buffer.buffer.width() as u16 + 2) {
+            for y in 0..area.height.min(self.buffer.buffer.height() as u16 + 2) {
                 if let Some(pixel) = self.pixel(
-                    self.cursorx.saturating_sub(width as usize - 3) + x as usize,
-                    self.cursory.saturating_sub(area.height as usize - 3) + y as usize,
+                    self.cursorx.saturating_sub((width - 3) as u32) + x as u32,
+                    self.cursory.saturating_sub(area.height as u32 - 3) + y as u32,
                 ) {
                     pixel.render(Rect::new(area.x + 2 * x, area.y + y, 2, 1), buf);
                 }

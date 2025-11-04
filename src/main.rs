@@ -7,10 +7,7 @@ use std::{
 use state::State;
 
 mod bar;
-mod files;
-mod map;
 mod state;
-mod tiles;
 mod ui;
 
 const HELP: &str = "Usage: kyutile --help|--version|<path>";

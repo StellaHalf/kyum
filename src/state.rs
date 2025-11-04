@@ -1,21 +1,14 @@
 use std::{
     collections::{HashMap, HashSet},
-    fs::{read_to_string, write},
+    fs::read,
     io,
 };
 
+use image::{ColorType, ImageBuffer, Rgba, load_from_memory, save_buffer};
 use itertools::Itertools;
 use ratatui::crossterm::event::KeyCode;
 
-use crate::{
-    bar::Input,
-    map::{create, draw_all, in_bounds, validate},
-    tiles::TILES,
-};
-use crate::{
-    files::{export_map, parse_map},
-    map::dot,
-};
+use crate::bar::Input;
 
 #[derive(PartialEq, Eq)]
 pub(crate) enum Bar {
@@ -40,35 +33,35 @@ pub(crate) enum Pen {
 pub(crate) enum Brush {
     Add,
     Subtract,
-    Tile(i32),
+    Color(Rgba<u8>),
 }
 
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct Map {
-    pub(crate) map: Vec<Vec<i32>>,
-    pub(crate) select: HashSet<(usize, usize)>,
+pub(crate) struct Buffer {
+    pub(crate) buffer: ImageBuffer<Rgba<u8>, Vec<u8>>,
+    pub(crate) select: HashSet<(u32, u32)>,
 }
 
 pub(crate) struct Clipboard {
-    pub(crate) content: HashMap<(isize, isize), i32>,
-    pub(crate) offsetx: usize,
-    pub(crate) offsety: usize,
+    pub(crate) content: HashMap<(i32, i32), Rgba<u8>>,
+    pub(crate) offsetx: u32,
+    pub(crate) offsety: u32,
 }
 
 pub(crate) struct State {
+    pub(crate) buffer: Buffer,
     pub(crate) argument: usize,
     pub(crate) bar: Bar,
     pub(crate) brush: Brush,
     pub(crate) clipboard: Option<Clipboard>,
-    pub(crate) cursorx: usize,
-    pub(crate) cursory: usize,
+    pub(crate) cursorx: u32,
+    pub(crate) cursory: u32,
     pub(crate) exit: bool,
-    pub(crate) last_saved: Option<Vec<Vec<i32>>>,
-    pub(crate) map: Map,
+    pub(crate) last_saved: Option<ImageBuffer<Rgba<u8>, Vec<u8>>>,
     pub(crate) path: Option<String>,
     pub(crate) pen: Pen,
-    redo_stack: Vec<Map>,
-    undo_stack: Vec<Map>,
+    redo_stack: Vec<Buffer>,
+    undo_stack: Vec<Buffer>,
 }
 
 struct Command {
@@ -117,36 +110,52 @@ fn parse_direction(arg: &str) -> Result<Direction, String> {
     }
 }
 
-fn parse_usize(arg: &str) -> Result<usize, String> {
+fn parse_u32(arg: &str) -> Result<u32, String> {
     arg.parse()
         .map_err(|_| format!("Parse error: {} is not an integer.", arg))
 }
-fn parse_tile(tile: &str) -> Result<i32, String> {
-    match TILES
-        .tiles
-        .iter()
-        .find(|v| v.1.to_lowercase() == tile.to_lowercase())
-    {
-        Some(t) => Ok(t.0 as i32),
-        None => {
-            if let Ok(i) = parse_usize(tile) {
-                if TILES.tiles.iter().any(|t| t.0 as usize == i) {
-                    Ok(i as i32)
-                } else {
-                    Err(format!("Parse error: invalid tile number {}.", i))
-                }
+
+fn parse_color(color: &str) -> Result<Rgba<u8>, String> {
+    Ok(match color.to_lowercase().as_str() {
+        "white" => Rgba([255, 255, 255, 255]),
+        "black" => Rgba([0, 0, 0, 255]),
+        "red" => Rgba([255, 0, 0, 255]),
+        "green" => Rgba([0, 255, 0, 255]),
+        "blue" => Rgba([0, 0, 255, 255]),
+        "yellow" => Rgba([255, 255, 0, 255]),
+        "magenta" => Rgba([255, 0, 255, 255]),
+        "cyan" => Rgba([0, 255, 255, 255]),
+        color => {
+            let err = format!(
+                "Parse error: {} is not a valid color. Valid are color names, RRGGBB or RRGGBBAA.",
+                color
+            );
+            if color.len() == 6 {
+                Rgba([
+                    u8::from_str_radix(&color[0..2], 16).map_err(|_| err.clone())?,
+                    u8::from_str_radix(&color[2..4], 16).map_err(|_| err.clone())?,
+                    u8::from_str_radix(&color[4..6], 16).map_err(|_| err.clone())?,
+                    255,
+                ])
+            } else if color.len() == 8 {
+                Rgba([
+                    u8::from_str_radix(&color[0..2], 16).map_err(|_| err.clone())?,
+                    u8::from_str_radix(&color[2..4], 16).map_err(|_| err.clone())?,
+                    u8::from_str_radix(&color[4..6], 16).map_err(|_| err.clone())?,
+                    u8::from_str_radix(&color[6..8], 16).map_err(|_| err.clone())?,
+                ])
             } else {
-                Err(format!("Parse error: {} is not a valid tile.", tile))
+                Err(err)?
             }
         }
-    }
+    })
 }
 
 impl State {
     pub(crate) fn new() -> Result<State, io::Error> {
         Ok(State {
-            map: Map {
-                map: create(11, 11, 0),
+            buffer: Buffer {
+                buffer: ImageBuffer::new(8, 8),
                 select: HashSet::new(),
             },
             clipboard: None,
@@ -157,7 +166,7 @@ impl State {
             cursorx: 0,
             cursory: 0,
             argument: 0,
-            brush: Brush::Tile(0),
+            brush: Brush::Color(Rgba([255, 255, 255, 255])),
             bar: Bar::Closed,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -167,12 +176,12 @@ impl State {
     pub(crate) fn modified(&self) -> bool {
         match &self.last_saved {
             None => false,
-            Some(saved) => self.map.map != *saved,
+            Some(saved) => self.buffer.buffer != *saved,
         }
     }
 
-    fn push_undo(&mut self, map_clone: Map) {
-        self.undo_stack.push(map_clone);
+    fn push_undo(&mut self, buffer_clone: Buffer) {
+        self.undo_stack.push(buffer_clone);
         self.redo_stack.clear();
     }
 
@@ -197,25 +206,17 @@ impl State {
 
     fn open_force(&mut self, args: &[&str]) -> CommandResult {
         let path = args[0];
-        let map = match parse_map(match &read_to_string(path) {
+        let buffer = match load_from_memory(match &read(path) {
             Ok(bytes) => bytes,
             Err(_) => return CommandResult::Err(format!("Could not open file {}.", path)),
         }) {
-            Ok(map) => map,
+            Ok(buffer) => buffer,
             Err(_) => return CommandResult::Err("Could not parse map.".to_owned()),
-        };
-        match validate(&map) {
-            Ok(_) => {
-                self.map = Map {
-                    map: map.clone(),
-                    select: HashSet::new(),
-                };
-                self.path = Some(path.to_owned());
-                self.last_saved = Some(map);
-                CommandResult::Ok(format!("Opened {}.", path))
-            }
-            Err(err) => CommandResult::Err(format!("Could not validate map: {}", err)),
         }
+        .into_rgba8();
+        self.buffer.buffer = buffer;
+        self.path = Some(path.to_owned());
+        CommandResult::Ok(format!("Opened {}.", path))
     }
 
     pub(crate) fn write(&mut self, args: &[&str]) -> CommandResult {
@@ -225,9 +226,18 @@ impl State {
         match &self.path {
             None => CommandResult::Err("No path set (use :w <path>).".to_owned()),
             Some(path) => {
-                write(path, export_map(&self.map.map)).unwrap();
-                self.last_saved = Some(self.map.map.clone());
-                CommandResult::Ok(format!("Written to {}.", path))
+                if let Err(err) = save_buffer(
+                    path,
+                    &self.buffer.buffer,
+                    self.buffer.buffer.width(),
+                    self.buffer.buffer.height(),
+                    ColorType::Rgba8,
+                ) {
+                    CommandResult::Err(format!("Format Error: {}.", err))
+                } else {
+                    self.last_saved = Some(self.buffer.buffer.clone());
+                    CommandResult::Ok(format!("Written to {}.", path))
+                }
             }
         }
     }
@@ -258,31 +268,37 @@ impl State {
         }
     }
     pub(crate) fn bucket(&mut self, _: &[&str]) -> CommandResult {
-        let map_clone = self.map.clone();
-        if let Brush::Tile(tile) = self.brush {
-            if draw_all(&mut self.map.map, self.map.select.clone(), tile) {
-                self.push_undo(map_clone);
+        let buffer_clone = self.buffer.clone();
+        if let Brush::Color(color) = self.brush {
+            for (x, y) in self.buffer.select.clone() {
+                self.buffer.buffer.put_pixel(x, y, color);
+            }
+            if self.buffer != buffer_clone {
+                self.push_undo(buffer_clone);
             }
         }
         CommandResult::None
     }
 
     pub(crate) fn dot(&mut self, _: &[&str]) -> CommandResult {
-        let map_clone = self.map.clone();
+        let buffer_clone = self.buffer.clone();
         match self.brush {
-            Brush::Tile(tile) => {
-                if dot(&mut self.map.map, self.cursory, self.cursorx, tile) {
-                    self.push_undo(map_clone);
+            Brush::Color(color) => {
+                if *self.buffer.buffer.get_pixel(self.cursorx, self.cursory) != color {
+                    self.buffer
+                        .buffer
+                        .put_pixel(self.cursorx, self.cursory, color);
+                    self.push_undo(buffer_clone);
                 }
             }
             Brush::Add => {
-                if self.map.select.insert((self.cursory, self.cursorx)) {
-                    self.push_undo(map_clone);
+                if self.buffer.select.insert((self.cursory, self.cursorx)) {
+                    self.push_undo(buffer_clone);
                 }
             }
             Brush::Subtract => {
-                if self.map.select.remove(&(self.cursory, self.cursorx)) {
-                    self.push_undo(map_clone);
+                if self.buffer.select.remove(&(self.cursory, self.cursorx)) {
+                    self.push_undo(buffer_clone);
                 }
             }
         }
@@ -297,9 +313,9 @@ impl State {
             "subtract" => {
                 self.brush = Brush::Subtract;
             }
-            tile => {
-                self.brush = Brush::Tile(match parse_tile(tile) {
-                    Ok(tile) => tile,
+            color => {
+                self.brush = Brush::Color(match parse_color(color) {
+                    Ok(color) => color,
                     Err(err) => return CommandResult::Err(err),
                 })
             }
@@ -327,7 +343,7 @@ impl State {
     pub(crate) fn r#move(&mut self, args: &[&str]) -> CommandResult {
         let distance = match args.get(1) {
             None => 1,
-            Some(arg) => match parse_usize(arg) {
+            Some(arg) => match parse_u32(arg) {
                 Ok(distance) => distance,
                 Err(err) => return CommandResult::Err(err),
             },
@@ -342,62 +358,62 @@ impl State {
         CommandResult::None
     }
 
-    fn move_cursor(&mut self, direction: Direction, distance: usize) {
+    fn move_cursor(&mut self, direction: Direction, distance: u32) {
         let (nx, ny, positions) = match direction {
             Direction::Left => {
-                let nx = (self.cursorx as isize - distance as isize).max(0) as usize;
+                let nx = (self.cursorx as i32 - distance as i32).max(0) as u32;
                 (
                     nx,
                     self.cursory,
                     (nx..self.cursorx)
-                        .map(|x| (self.cursory, x))
+                        .map(|x| (x, self.cursory))
                         .collect::<Vec<_>>(),
                 )
             }
             Direction::Down => {
-                let ny = (self.cursory + distance).min(self.map.map.len() - 1);
+                let ny = (self.cursory + distance).min(self.buffer.buffer.height() - 1);
                 (
                     self.cursorx,
                     ny,
-                    (self.cursory + 1..=ny).map(|y| (y, self.cursorx)).collect(),
+                    (self.cursory + 1..=ny).map(|y| (self.cursorx, y)).collect(),
                 )
             }
             Direction::Up => {
-                let ny = (self.cursory as isize - distance as isize).max(0) as usize;
+                let ny = (self.cursory as i32 - distance as i32).max(0) as u32;
                 (
                     self.cursorx,
                     ny,
-                    (ny..self.cursory).map(|y| (y, self.cursorx)).collect(),
+                    (ny..self.cursory).map(|y| (self.cursorx, y)).collect(),
                 )
             }
             Direction::Right => {
-                let nx = (self.cursorx + distance).min(self.map.map[0].len() - 1);
+                let nx = (self.cursorx + distance).min(self.buffer.buffer.width() - 1);
                 (
                     nx,
                     self.cursory,
-                    (self.cursorx + 1..=nx).map(|x| (self.cursory, x)).collect(),
+                    (self.cursorx + 1..=nx).map(|x| (x, self.cursory)).collect(),
                 )
             }
         };
         self.cursorx = nx;
         self.cursory = ny;
         if self.pen == Pen::Down {
-            let map_clone = self.map.clone();
+            let buffer_clone = self.buffer.clone();
             match self.brush {
-                Brush::Tile(tile) => {
+                Brush::Color(color) => {
                     for &(i, j) in &positions {
-                        dot(&mut self.map.map, i, j, tile);
+                        self.buffer.buffer.put_pixel(i, j, color);
                     }
                 }
-                Brush::Add => self.map.select.extend(positions),
+                Brush::Add => self.buffer.select.extend(positions),
                 Brush::Subtract => {
                     for p in positions {
-                        self.map.select.remove(&p);
+                        self.buffer.select.remove(&p);
                     }
                 }
             }
-            if self.map != map_clone {
-                self.push_undo(map_clone);
+            if self.buffer != buffer_clone {
+                self.push_undo(buffer_clone);
             }
         }
     }
@@ -409,26 +425,30 @@ impl State {
         } {
             Direction::Left => self.move_cursor(Direction::Left, self.cursorx),
             Direction::Down => {
-                self.move_cursor(Direction::Down, self.map.map[0].len() - self.cursory)
+                self.move_cursor(Direction::Down, self.buffer.buffer.height() - self.cursory)
             }
             Direction::Up => self.move_cursor(Direction::Up, self.cursory),
             Direction::Right => {
-                self.move_cursor(Direction::Right, self.map.map[0].len() - self.cursorx)
+                self.move_cursor(Direction::Right, self.buffer.buffer.width() - self.cursorx)
             }
         };
         CommandResult::None
     }
 
+    fn in_bounds(&self, x: u32, y: u32) -> bool {
+        x < self.buffer.buffer.width() && y < self.buffer.buffer.height()
+    }
+
     pub(crate) fn goto(&mut self, args: &[&str]) -> CommandResult {
-        let i = match parse_usize(args[0]) {
+        let i = match parse_u32(args[0]) {
             Ok(i) => i,
             Err(err) => return CommandResult::Err(err),
         };
-        let j = match parse_usize(args[1]) {
+        let j = match parse_u32(args[1]) {
             Ok(j) => j,
             Err(err) => return CommandResult::Err(err),
         };
-        if in_bounds(self.map.map.len(), self.map.map[0].len(), i, j) {
+        if self.in_bounds(i, j) {
             self.cursorx = i;
             self.cursory = j;
             CommandResult::None
@@ -438,42 +458,43 @@ impl State {
     }
 
     pub(crate) fn pick(&mut self, _: &[&str]) -> CommandResult {
-        self.brush = Brush::Tile(self.map.map[self.cursory][self.cursorx]);
+        self.brush = Brush::Color(*self.buffer.buffer.get_pixel(self.cursorx, self.cursory));
         CommandResult::None
     }
 
     pub(crate) fn select(&mut self, args: &[&str]) -> CommandResult {
-        let map_clone = self.map.clone();
+        let buffer_clone = self.buffer.clone();
         match args[0].to_lowercase().as_str() {
             "all" => {
-                self.map.select =
-                    ((0..self.map.map.len()).cartesian_product(0..self.map.map[0].len())).collect();
-                CommandResult::None
-            }
-            "none" => {
-                self.map.select.clear();
-                CommandResult::None
-            }
-            "invert" => {
-                self.map.select = ((0..self.map.map.len())
-                    .cartesian_product(0..self.map.map[0].len()))
-                .filter(|p| !self.map.select.contains(p))
+                self.buffer.select = ((0..self.buffer.buffer.width())
+                    .cartesian_product(0..self.buffer.buffer.height()))
                 .collect();
                 CommandResult::None
             }
-            arg => match parse_tile(arg) {
+            "none" => {
+                self.buffer.select.clear();
+                CommandResult::None
+            }
+            "invert" => {
+                self.buffer.select = ((0..self.buffer.buffer.width())
+                    .cartesian_product(0..self.buffer.buffer.height()))
+                .filter(|p| !self.buffer.select.contains(p))
+                .collect();
+                CommandResult::None
+            }
+            arg => match parse_color(arg) {
                 Ok(tile) => {
-                    let positions = (0..self.map.map.len())
-                        .cartesian_product(0..self.map.map[0].len())
-                        .filter(|&(i, j)| self.map.map[i][j] == tile);
+                    let positions = (0..self.buffer.buffer.width())
+                        .cartesian_product(0..self.buffer.buffer.height())
+                        .filter(|&(i, j)| *self.buffer.buffer.get_pixel(i, j) == tile);
                     match self.brush {
-                        Brush::Add => self.map.select.extend(positions),
+                        Brush::Add => self.buffer.select.extend(positions),
                         Brush::Subtract => {
                             for p in positions {
-                                self.map.select.remove(&p);
+                                self.buffer.select.remove(&p);
                             }
                         }
-                        _ => self.map.select = positions.collect(),
+                        _ => self.buffer.select = positions.collect(),
                     }
                     CommandResult::None
                 }
@@ -485,8 +506,8 @@ impl State {
                 }
             },
         };
-        if self.map.select != map_clone.select {
-            self.push_undo(map_clone);
+        if self.buffer.select != buffer_clone.select {
+            self.push_undo(buffer_clone);
         };
         CommandResult::None
     }
@@ -494,34 +515,37 @@ impl State {
     pub(crate) fn draw_shape<F, I>(&mut self, args: &[&str], shape: F) -> CommandResult
     where
         F: FnOnce(&[&str]) -> Result<I, String>,
-        I: IntoIterator<Item = (usize, usize)>,
+        I: IntoIterator<Item = (u32, u32)>,
     {
-        let (lx, ly) = (self.map.map.len(), self.map.map[0].len());
         let positions = match shape(args) {
             Ok(i) => i,
             Err(err) => return CommandResult::Err(err),
         }
         .into_iter()
-        .filter(|(x, y)| in_bounds(lx, ly, *x, *y));
-        let map_clone = self.map.clone();
+        .filter(|(x, y)| self.in_bounds(*x, *y))
+        .collect::<Vec<_>>();
+        let buffer_clone = self.buffer.clone();
         match &self.brush {
             Brush::Add => {
-                self.map.select.extend(positions);
-                if self.map.select != map_clone.select {
-                    self.push_undo(map_clone);
+                self.buffer.select.extend(positions);
+                if self.buffer.select != buffer_clone.select {
+                    self.push_undo(buffer_clone);
                 }
             }
             Brush::Subtract => {
                 for p in positions {
-                    self.map.select.remove(&p);
+                    self.buffer.select.remove(&p);
                 }
-                if self.map.select != map_clone.select {
-                    self.push_undo(map_clone);
+                if self.buffer.select != buffer_clone.select {
+                    self.push_undo(buffer_clone);
                 }
             }
-            Brush::Tile(tile) => {
-                if draw_all(&mut self.map.map, positions, *tile) {
-                    self.push_undo(map_clone);
+            Brush::Color(color) => {
+                for (x, y) in positions {
+                    self.buffer.buffer.put_pixel(x, y, *color);
+                }
+                if self.buffer != buffer_clone {
+                    self.push_undo(buffer_clone);
                 }
             }
         }
@@ -529,17 +553,17 @@ impl State {
     }
 
     pub(crate) fn fuzzy(&mut self, args: &[&str]) -> CommandResult {
-        let map = self.map.map.clone();
+        let buffer = self.buffer.buffer.clone();
         let cursorx = self.cursorx;
         let cursory = self.cursory;
         self.draw_shape(args, |args| {
             let mut reached = HashSet::new();
             let mut frontier = HashSet::new();
             let mut new_frontier = HashSet::new();
-            frontier.insert((cursory, cursorx));
-            let tile = map[cursory][cursorx];
+            frontier.insert((cursorx, cursory));
+            let color = buffer.get_pixel(cursorx, cursory);
             let mut i = match args.first() {
-                Some(arg) => parse_usize(arg)? as isize,
+                Some(arg) => parse_u32(arg)? as i32,
                 None => -1,
             };
             while !frontier.is_empty() && i != 0 {
@@ -548,16 +572,16 @@ impl State {
                 new_frontier.clear();
                 for (i, j) in frontier.clone() {
                     for (di, dj) in [(-1, 0), (0, -1), (1, 0), (0, 1)] {
-                        let ni = i as isize + di;
-                        let nj = j as isize + dj;
+                        let ni = i as i32 + di;
+                        let nj = j as i32 + dj;
                         if ni >= 0
-                            && ni < map.len() as isize
+                            && ni < buffer.width() as i32
                             && nj >= 0
-                            && nj < map[0].len() as isize
-                            && !reached.contains(&(ni as usize, nj as usize))
-                            && map[ni as usize][nj as usize] == tile
+                            && nj < buffer.height() as i32
+                            && !reached.contains(&(ni as u32, nj as u32))
+                            && buffer.get_pixel(ni as u32, nj as u32) == color
                         {
-                            new_frontier.insert((ni as usize, nj as usize));
+                            new_frontier.insert((ni as u32, nj as u32));
                         }
                     }
                     frontier.clear();
@@ -571,10 +595,10 @@ impl State {
     pub(crate) fn r#box(&mut self, args: &[&str]) -> CommandResult {
         self.draw_shape::<_, Vec<_>>(args, |args| {
             let (x0, y0, x1, y1) = (
-                parse_usize(args[0])?,
-                parse_usize(args[1])?,
-                parse_usize(args[2])?,
-                parse_usize(args[3])?,
+                parse_u32(args[0])?,
+                parse_u32(args[1])?,
+                parse_u32(args[2])?,
+                parse_u32(args[3])?,
             );
             let fill = if let Some(arg) = args.get(4) {
                 if *arg == "fill" || *arg == "true" {
@@ -602,10 +626,10 @@ impl State {
     pub(crate) fn ellipse(&mut self, args: &[&str]) -> CommandResult {
         self.draw_shape(args, |args| {
             let (x0, y0, x1, y1) = (
-                parse_usize(args[0])? as isize,
-                parse_usize(args[1])? as isize,
-                parse_usize(args[2])? as isize,
-                parse_usize(args[3])? as isize,
+                parse_u32(args[0])? as i32,
+                parse_u32(args[1])? as i32,
+                parse_u32(args[2])? as i32,
+                parse_u32(args[3])? as i32,
             );
             let fill = if let Some(arg) = args.get(4) {
                 if *arg == "fill" || *arg == "true" {
@@ -630,10 +654,10 @@ impl State {
             let a = 8 * a * a;
             let mut e2;
             while x0 <= x1 {
-                let x0u = x0 as usize;
-                let x1u = x1 as usize;
-                let y0u = y0 as usize;
-                let y1u = y1 as usize;
+                let x0u = x0 as u32;
+                let x1u = x1 as u32;
+                let y0u = y0 as u32;
+                let y1u = y1 as u32;
                 if fill {
                     positions.extend(
                         (x0u..=x1u)
@@ -662,33 +686,28 @@ impl State {
     }
 
     pub(crate) fn create(&mut self, args: &[&str]) -> CommandResult {
-        let y = match parse_usize(args[1]) {
+        let y = match parse_u32(args[1]) {
             Ok(y) => y,
             Err(err) => return CommandResult::Err(err),
         };
-        let x = match parse_usize(args[0]) {
+        let x = match parse_u32(args[0]) {
             Ok(x) => x,
             Err(err) => return CommandResult::Err(err),
         };
-        let new_map = Map {
-            map: create(y, x, 0),
+        let new_map = Buffer {
+            buffer: ImageBuffer::new(x, y),
             select: HashSet::new(),
         };
-        if self.map != new_map {
-            self.push_undo(self.map.clone());
-            self.map = new_map;
+        if self.buffer != new_map {
+            self.push_undo(self.buffer.clone());
+            self.buffer = new_map;
         }
         self.reset_cursor();
         CommandResult::Ok(format!("Created empty {}x{} map.", x, y))
     }
 
     pub(crate) fn reset_cursor(&mut self) {
-        if !in_bounds(
-            self.map.map[0].len(),
-            self.map.map.len(),
-            self.cursorx,
-            self.cursory,
-        ) {
+        if !self.in_bounds(self.cursorx, self.cursory) {
             self.cursorx = 0;
             self.cursory = 0;
         }
@@ -698,8 +717,8 @@ impl State {
         match self.undo_stack.pop() {
             None => CommandResult::Err("Undo stack is empty.".to_owned()),
             Some(map) => {
-                self.redo_stack.push(self.map.clone());
-                self.map = map;
+                self.redo_stack.push(self.buffer.clone());
+                self.buffer = map;
                 self.reset_cursor();
                 CommandResult::None
             }
@@ -710,8 +729,8 @@ impl State {
         match self.redo_stack.pop() {
             None => CommandResult::Err("Redo stack is empty".to_owned()),
             Some(map) => {
-                self.undo_stack.push(self.map.clone());
-                self.map = map;
+                self.undo_stack.push(self.buffer.clone());
+                self.buffer = map;
                 self.reset_cursor();
                 CommandResult::None
             }
@@ -762,9 +781,12 @@ impl State {
                 Pen::Down => "Down",
             },
             match self.brush {
-                Brush::Add => "add",
-                Brush::Subtract => "subtract",
-                Brush::Tile(tile) => TILES.tiles.iter().find(|t| t.0 as i32 == tile).unwrap().1,
+                Brush::Add => "add".to_owned(),
+                Brush::Subtract => "subtract".to_owned(),
+                Brush::Color(color) => format!(
+                    "{:02x}{:02x}{:02x}{:02x}",
+                    color.0[0], color.0[1], color.0[2], color.0[3]
+                ),
             },
             self.cursorx,
             self.cursory,
@@ -779,41 +801,45 @@ impl State {
     pub(crate) fn copy(&mut self, _: &[&str]) -> CommandResult {
         self.clipboard = Some(Clipboard {
             content: self
-                .map
+                .buffer
                 .select
                 .iter()
-                .map(|(i, j)| ((*i as isize, *j as isize), self.map.map[*i][*j]))
+                .map(|(i, j)| {
+                    (
+                        (*i as i32, *j as i32),
+                        *self.buffer.buffer.get_pixel(*i, *j),
+                    )
+                })
                 .collect(),
             offsetx: self.cursorx,
             offsety: self.cursory,
         });
         CommandResult::Ok(format!(
             "Copied {} tiles to clipboard.",
-            self.map.select.len()
+            self.buffer.select.len()
         ))
     }
 
     pub(crate) fn paste(&mut self, _: &[&str]) -> CommandResult {
-        let ly = self.map.map[0].len();
-        let lx = self.map.map.len();
-        let map_clone = self.map.clone();
+        let buffer_clone = self.buffer.clone();
         if let Some(clipboard) = &self.clipboard {
-            for (i, j, tile) in clipboard
+            for (i, j, color) in clipboard
                 .content
                 .iter()
-                .map(|((i, j), tile)| {
+                .map(|((i, j), color)| {
                     (
-                        (*i + self.cursory as isize - (clipboard.offsety as isize)) as usize,
-                        (*j + self.cursorx as isize - (clipboard.offsetx as isize)) as usize,
-                        tile,
+                        (*i + self.cursory as i32 - (clipboard.offsety as i32)) as u32,
+                        (*j + self.cursorx as i32 - (clipboard.offsetx as i32)) as u32,
+                        color,
                     )
                 })
-                .filter(|(i, j, _)| in_bounds(lx, ly, *i, *j))
+                .filter(|(i, j, _)| self.in_bounds(*i, *j))
+                .collect_vec()
             {
-                self.map.map[i][j] = *tile;
+                self.buffer.buffer.put_pixel(i, j, *color);
             }
-            if self.map.map != map_clone.map {
-                self.push_undo(map_clone);
+            if self.buffer.buffer != buffer_clone.buffer {
+                self.push_undo(buffer_clone);
             }
             CommandResult::None
         } else {
@@ -831,8 +857,8 @@ impl State {
                         .map(|((i, j), tile)| {
                             (
                                 (
-                                    *j - clipboard.offsetx as isize + clipboard.offsety as isize,
-                                    -i + clipboard.offsetx as isize + clipboard.offsety as isize,
+                                    *j - clipboard.offsetx as i32 + clipboard.offsety as i32,
+                                    -i + clipboard.offsetx as i32 + clipboard.offsety as i32,
                                 ),
                                 *tile,
                             )
@@ -847,8 +873,8 @@ impl State {
                         .map(|((i, j), tile)| {
                             (
                                 (
-                                    -j + clipboard.offsetx as isize + clipboard.offsety as isize,
-                                    *i - clipboard.offsetx as isize + clipboard.offsety as isize,
+                                    -j + clipboard.offsetx as i32 + clipboard.offsety as i32,
+                                    *i - clipboard.offsetx as i32 + clipboard.offsety as i32,
                                 ),
                                 *tile,
                             )
@@ -860,7 +886,7 @@ impl State {
                     clipboard.content = clipboard
                         .content
                         .iter()
-                        .map(|((i, j), tile)| ((*i, -j + 2 * clipboard.offsetx as isize), *tile))
+                        .map(|((i, j), tile)| ((*i, -j + 2 * clipboard.offsetx as i32), *tile))
                         .collect();
                     CommandResult::Ok("Reflected the clipboard horizontally".to_owned())
                 }
@@ -868,7 +894,7 @@ impl State {
                     clipboard.content = clipboard
                         .content
                         .iter()
-                        .map(|((i, j), tile)| ((-i + 2 * clipboard.offsety as isize, *j), *tile))
+                        .map(|((i, j), tile)| ((-i + 2 * clipboard.offsety as i32, *j), *tile))
                         .collect();
                     CommandResult::Ok("Reflected the clipboard vertically.".to_owned())
                 }
@@ -883,7 +909,7 @@ impl State {
     }
 
     fn move_with(&mut self, direction: Direction) -> CommandResult {
-        self.move_cursor(direction, self.argument.max(1));
+        self.move_cursor(direction, self.argument.max(1) as u32);
         self.argument = 0;
         CommandResult::None
     }
@@ -946,8 +972,11 @@ impl State {
             KeyCode::Char('f') => {
                 self.bucket(&[]);
             }
-            KeyCode::Char('p') => {
+            KeyCode::Char('e') => {
                 self.pick(&[]);
+            }
+            KeyCode::Char('E') => {
+                self.brush(&["00000000"]);
             }
             KeyCode::Char('u') => {
                 self.undo(&[]);

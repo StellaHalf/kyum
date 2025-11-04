@@ -78,9 +78,12 @@ The following commands exist for the sake of completeness, but are recommended t
 | `K`          | `edge up`                                          |
 | `L`          | `edge right`                                       |
 | `d`          | `dot`                                              |
+| `D`          | `erase`                                            |
 | `f`          | `bucket`                                           |
 | `a`          | `brush add`                                        |
 | `s`          | `brush subtract`                                   |
+| `e`          | `pick`                                             |
+| `E`          | `brush 00000000`                                   |
 | `A`          | `select all`                                       |
 | `S`          | `select none`                                      |
 | `F`          | `select invert`                                    |
@@ -90,7 +93,6 @@ The following commands exist for the sake of completeness, but are recommended t
 | `I`          | `pen up`                                           |
 | `o`          | `copy`                                             |
 | `O`          | `paste`                                            |
-| `p`          | `pick`                                             |
 
 The argument, used only for the move bindings, can be inputted using numbers, and cleared with the `Esc` key. 
 
