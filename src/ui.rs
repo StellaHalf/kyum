@@ -17,7 +17,7 @@ const CURSOR_COLOR: Color = Color::Rgb(255, 0, 75);
 
 impl State {
     fn pixel(&'_ self, x: u32, y: u32) -> Option<(Paragraph<'_>, Paragraph<'_>)> {
-        if x < self.buffer.buffer.width() + 2 && y < self.buffer.buffer.width() + 2 {
+        if x < self.buffer.buffer.width() + 2 && y < self.buffer.buffer.height() + 2 {
             Some(
                 match (
                     x == 0,
