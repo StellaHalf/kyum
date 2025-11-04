@@ -1,4 +1,4 @@
-# Kyutile
+# Kyum
 A [Neovim](https://neovim.io) inspired terminal image editor.
 
 ## Installation
